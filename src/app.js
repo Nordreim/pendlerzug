@@ -8,7 +8,7 @@ const provider = getProvider('transitous');
 
 const $ = (id) => document.getElementById(id);
 const els = {
-  start: $('start'), dest: $('dest'), swap: $('swap'), offset: $('offset'),
+  start: $('start'), dests: $('dests'), swap: $('swap'), offset: $('offset'),
   timeOut: $('timeOut'), lines: $('lines'), form: $('search'), submit: $('submit'),
   error: $('formError'), onlyDest: $('onlyDest'), results: $('results'), clock: $('clock'),
 };
@@ -33,11 +33,13 @@ function renderClock() {
 function initForm() {
   const options = STATIONS.map((s) => `<option value="${s.key}">${esc(s.name)}</option>`).join('');
   els.start.innerHTML = options;
-  els.dest.innerHTML = options;
+  els.dests.innerHTML = STATIONS.map(
+    (s) => `<label class="chip"><input type="checkbox" name="dests" value="${s.key}" /><span>${esc(s.name)}</span></label>`,
+  ).join('');
 
   const morning = hourInBerlin(new Date()) < 12;
   els.start.value = morning ? 'stade' : 'hbf';
-  els.dest.value = morning ? 'hbf' : 'stade';
+  setDests([morning ? 'hbf' : 'stade']);
 
   els.lines.innerHTML = LINES.map(
     (l) => `<label class="chip" style="--c:${l.color}">
@@ -46,11 +48,23 @@ function initForm() {
   ).join('');
 
   els.swap.addEventListener('click', () => {
-    [els.start.value, els.dest.value] = [els.dest.value, els.start.value];
+    // Neuer Start: das am weitesten entfernte gewählte Ziel; neues Ziel: der bisherige Start
+    const oldStart = els.start.value;
+    const dests = selectedDests();
+    if (!dests.length) return;
+    const far = dests.reduce((best, k) =>
+      Math.abs(stationByKey(k).order - stationByKey(oldStart).order) >
+      Math.abs(stationByKey(best).order - stationByKey(oldStart).order) ? k : best);
+    els.start.value = far;
+    setDests([oldStart]);
     validate();
   });
   els.offset.addEventListener('input', renderClock);
-  [els.start, els.dest].forEach((el) => el.addEventListener('change', validate));
+  els.start.addEventListener('change', () => {
+    syncDisabled();
+    validate();
+  });
+  els.dests.addEventListener('change', validate);
   els.lines.addEventListener('change', validate);
   els.form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -61,13 +75,34 @@ function initForm() {
   setInterval(renderClock, 15000);
 }
 
+function setDests(keys) {
+  els.dests.querySelectorAll('input').forEach((i) => (i.checked = keys.includes(i.value)));
+  syncDisabled();
+}
+
+/** Der Startbahnhof kann nicht gleichzeitig Ziel sein. */
+function syncDisabled() {
+  els.dests.querySelectorAll('input').forEach((i) => {
+    i.disabled = i.value === els.start.value;
+    if (i.disabled) i.checked = false;
+  });
+}
+
+/** Gewählte Ziele, sortiert nach Entfernung vom Start. */
+function selectedDests() {
+  const start = stationByKey(els.start.value);
+  return [...els.dests.querySelectorAll('input:checked')]
+    .map((i) => i.value)
+    .sort((x, y) => Math.abs(stationByKey(x).order - start.order) - Math.abs(stationByKey(y).order - start.order));
+}
+
 function selectedLines() {
   return [...els.lines.querySelectorAll('input:checked')].map((i) => i.value);
 }
 
 function validate() {
   let msg = '';
-  if (els.start.value === els.dest.value) msg = 'Start- und Zielbahnhof müssen unterschiedlich sein.';
+  if (!selectedDests().length) msg = 'Bitte mindestens einen Zielbahnhof auswählen.';
   else if (!selectedLines().length) msg = 'Bitte mindestens eine Linie auswählen.';
   els.error.textContent = msg;
   els.error.hidden = !msg;
@@ -80,26 +115,26 @@ async function search() {
   controller?.abort();
   controller = new AbortController();
   const startKey = els.start.value;
-  const destKey = els.dest.value;
+  const destKeys = selectedDests();
   const lines = selectedLines();
   const time = selectedTime();
-  const hints = lineHints(startKey, destKey, lines);
+  const hints = [...new Set(destKeys.flatMap((d) => lineHints(startKey, d, lines)))];
 
   els.submit.disabled = true;
   els.submit.textContent = 'Suche läuft …';
-  els.results.innerHTML = head(startKey, destKey, time) + hintsHtml(hints) +
+  els.results.innerHTML = head(startKey, destKeys, time) + hintsHtml(hints) +
     '<div class="skeleton"></div>'.repeat(RESULT_COUNT);
 
   try {
     const { connections } = await provider.searchConnections({
-      startKey, destKey, lines, time, count: RESULT_COUNT, signal: controller.signal,
+      startKey, destKeys, lines, time, count: RESULT_COUNT, signal: controller.signal,
       onlyReachingDestination: els.onlyDest.checked,
     });
-    renderResults({ startKey, destKey, time, hints, connections });
+    renderResults({ startKey, destKeys, time, hints, connections });
   } catch (e) {
     if (e.name === 'AbortError') return;
     console.error(e);
-    els.results.innerHTML = head(startKey, destKey, time) + `<div class="card error">
+    els.results.innerHTML = head(startKey, destKeys, time) + `<div class="card error">
       <strong>Die Fahrplandaten konnten gerade nicht geladen werden.</strong><br />
       ${esc(e.message)}<br /><button type="button" id="retry">Erneut versuchen</button></div>`;
     $('retry')?.addEventListener('click', search);
@@ -109,21 +144,21 @@ async function search() {
   }
 }
 
-function head(startKey, destKey, time) {
+function head(startKey, destKeys, time) {
+  const names = destKeys.map((k) => (destKeys.length > 1 ? shortName(stationByKey(k).name) : stationByKey(k).name));
   return `<div class="results-head">
-    <h2>${esc(stationByKey(startKey).name)} → ${esc(stationByKey(destKey).name)}</h2>
+    <h2>${esc(stationByKey(startKey).name)} → ${esc(names.join(', '))}</h2>
     <span class="meta">ab ${fmtTime.format(time)} Uhr</span></div>`;
 }
 
 const hintsHtml = (hints) => hints.map((h) => `<p class="hint">${esc(h)}</p>`).join('');
 
-function renderResults({ startKey, destKey, time, hints, connections }) {
-  const destName = stationByKey(destKey).name;
-  let html = head(startKey, destKey, time) + hintsHtml(hints);
+function renderResults({ startKey, destKeys, time, hints, connections }) {
+  let html = head(startKey, destKeys, time) + hintsHtml(hints);
   if (!connections.length) {
     html += `<div class="card empty">Keine passenden Verbindungen in den nächsten Stunden gefunden.</div>`;
   } else {
-    html += connections.map((c) => connectionHtml(c, destName)).join('');
+    html += connections.map((c) => connectionHtml(c)).join('');
     if (connections.length < RESULT_COUNT) {
       html += `<p class="hint">In den nächsten rund 90 Minuten wurden nur ${connections.length} passende Verbindung${connections.length === 1 ? '' : 'en'} gefunden.</p>`;
     }
@@ -132,7 +167,21 @@ function renderResults({ startKey, destKey, time, hints, connections }) {
   els.results.innerHTML = html;
 }
 
-function connectionHtml(c, destName) {
+function arrivalInfo(c, ar) {
+  const time = c.cancelled ? null : t(ar.expectedArrival);
+  const late = ar.plannedArrival && ar.expectedArrival &&
+    new Date(ar.expectedArrival) - new Date(ar.plannedArrival) >= 60000;
+  let sub = '';
+  if (ar.continuesVia && !c.cancelled) {
+    const wait = ar.continuesWaitMin ?? 0;
+    sub = `Weiterfahrt ab ${esc(ar.continuesVia)} um ${t(ar.continuesAt)} Uhr${wait >= 5 ? ` (${wait} min Aufenthalt)` : ''}`;
+  } else if (!time && !c.cancelled) {
+    sub = `Zug hält nicht in ${esc(ar.stationName)}`;
+  }
+  return { time, late, sub };
+}
+
+function connectionHtml(c) {
   const line = LINES.find((l) => l.key === c.line);
   const delay = c.plannedDeparture && c.expectedDeparture
     ? Math.round((new Date(c.expectedDeparture) - new Date(c.plannedDeparture)) / 60000) : 0;
@@ -143,16 +192,26 @@ function connectionHtml(c, destName) {
   else if (delay > 0) status = `<span class="status late">+${delay} min</span>`;
   else status = '<span class="status ok">pünktlich</span>';
 
-  const arr = c.cancelled ? null : t(c.expectedArrival || c.plannedArrival);
-  const arrDelay = c.plannedArrival && c.expectedArrival
-    ? Math.round((new Date(c.expectedArrival) - new Date(c.plannedArrival)) / 60000) : 0;
+  const depCells = `
+      <div class="cell"><span class="k">Geplant</span><span class="v tnum">${t(c.plannedDeparture) ?? '–'}</span></div>
+      <div class="cell"><span class="k">Voraussichtl.</span><span class="v big tnum${delay > 0 && !c.cancelled ? ' late' : ''}">${t(c.expectedDeparture) ?? '–'}</span></div>
+      <div class="cell"><span class="k">Gleis</span><span class="v tnum${c.track ? '' : ' muted'}">${esc(c.track) || '–'}</span></div>`;
 
-  let note = '';
-  if (c.continuesVia && !c.cancelled) {
-    const wait = c.continuesWaitMin ?? 0;
-    note = `<p class="note">Weiterfahrt ab ${esc(c.continuesVia)} um ${t(c.continuesAt)} Uhr${wait >= 5 ? ` (${wait} min Aufenthalt)` : ''}.</p>`;
-  } else if (!arr && !c.cancelled) {
-    note = `<p class="note">Dieser Zug fährt nicht bis ${esc(destName)}.</p>`;
+  let body;
+  if (c.arrivals.length === 1) {
+    const ar = c.arrivals[0];
+    const info = arrivalInfo(c, ar);
+    body = `<div class="grid">${depCells}
+      <div class="cell"><span class="k">An ${esc(shortName(ar.stationName))}</span>
+        <span class="v tnum${info.time ? (info.late ? ' late' : '') : ' muted'}">${info.time ?? 'n.V.'}</span></div>
+    </div>${info.sub ? `<p class="note">${info.sub}.</p>` : ''}`;
+  } else {
+    const rows = c.arrivals.map((ar) => {
+      const info = arrivalInfo(c, ar);
+      return `<div class="row"><span class="k">An ${esc(ar.stationName)}${info.sub ? `<span class="sub">${info.sub}</span>` : ''}</span>
+        <span class="v tnum${info.time ? (info.late ? ' late' : '') : ' muted'}">${info.time ?? 'n.V.'}</span></div>`;
+    }).join('');
+    body = `<div class="grid three">${depCells}</div><div class="arrivals">${rows}</div>`;
   }
 
   return `<article class="card conn${c.cancelled ? ' cancelled' : ''}" style="--c:${line?.color || '#14213d'}">
@@ -161,18 +220,13 @@ function connectionHtml(c, destName) {
       <span class="direction">${esc(c.direction)}${c.trainNumber ? ` <span class="sub" style="color:var(--ink-3);font-weight:500">· ${esc(c.trainNumber)}</span>` : ''}</span>
       ${status}
     </div>
-    <div class="grid">
-      <div class="cell"><span class="k">Geplant</span><span class="v tnum">${t(c.plannedDeparture) ?? '–'}</span></div>
-      <div class="cell"><span class="k">Voraussichtl.</span><span class="v big tnum${delay > 0 && !c.cancelled ? ' late' : ''}">${t(c.expectedDeparture) ?? '–'}</span></div>
-      <div class="cell"><span class="k">Gleis</span><span class="v tnum${c.track ? '' : ' muted'}">${esc(c.track) || '–'}</span></div>
-      <div class="cell"><span class="k">An ${esc(shortName(destName))}</span>
-        <span class="v tnum${arr ? (arrDelay > 0 ? ' late' : '') : ' muted'}">${arr ?? 'n.V.'}</span></div>
-    </div>
-    ${note}
+    ${body}
   </article>`;
 }
 
-const shortName = (n) => n.replace('Hamburg-', '').replace('Hamburg ', '');
+function shortName(n) {
+  return n.replace('Hamburg-', '').replace('Hamburg ', '');
+}
 
 initForm();
 validate();

@@ -9,10 +9,21 @@ const MAX_CANDIDATES = 60;
 const BATCH = 4;
 const MAX_CONTINUATION_WAIT_MIN = 30;
 
+// Kurzer Zwischenspeicher, damit gleiche Abfragen (z. B. bei mehreren Zielen)
+// nicht mehrfach an Transitous gehen.
+const CACHE_TTL_MS = 45000;
+const cache = new Map();
+
 async function getJson(url, signal) {
-  const res = await fetch(url, { signal, referrerPolicy: 'strict-origin-when-cross-origin' });
-  if (!res.ok) throw new Error(`Transitous antwortet mit HTTP ${res.status}`);
-  return res.json();
+  const hit = cache.get(url);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.promise;
+  const promise = fetch(url, { signal, referrerPolicy: 'strict-origin-when-cross-origin' }).then((res) => {
+    if (!res.ok) throw new Error(`Transitous antwortet mit HTTP ${res.status}`);
+    return res.json();
+  });
+  cache.set(url, { at: Date.now(), promise });
+  promise.catch(() => cache.delete(url));
+  return promise;
 }
 
 /** "de-DELFI_de:02000:10950_G" -> "de:02000:10950" */
@@ -136,12 +147,13 @@ export const transitousProvider = {
   label: 'Transitous',
 
   /**
-   * @param {{startKey:string,destKey:string,lines:string[],time:Date,count:number,signal?:AbortSignal}} q
-   * @returns {Promise<{connections: Array, realtimeAvailable: boolean}>}
+   * @param {{startKey:string,destKeys:string[],lines:string[],time:Date,count?:number,
+   *          signal?:AbortSignal,onlyReachingDestination?:boolean}} q
+   * @returns {Promise<{connections: Array}>}
    */
-  async searchConnections({ startKey, destKey, lines, time, count = 4, signal, onlyReachingDestination = false }) {
+  async searchConnections({ startKey, destKeys, lines, time, count = 4, signal, onlyReachingDestination = false }) {
     const start = stationByKey(startKey);
-    const dest = stationByKey(destKey);
+    const dests = destKeys.map(stationByKey).filter((d) => d && d.key !== start.key);
     const from = new Date(time.getTime() - LOOKBACK_MIN * 60000);
     const types = [...new Set(lines.map((l) => (l.startsWith('S') ? 'S' : 'RE')))];
     const stopIds = [...new Set(types.map((t) => start.transitous[t]))];
@@ -158,68 +170,83 @@ export const transitousProvider = {
         return getJson(`${BASE}/stoptimes?${params}`, signal);
       }),
     );
-    const data = { stopTimes: responses.flatMap((r) => r.stopTimes || []) };
     const minTime = Math.floor(time.getTime() / 60000) * 60000;
+    const depOf = (st) => new Date(st.place.departure || st.place.scheduledDeparture).getTime();
 
     const seen = new Set();
-    const candidates = (data.stopTimes || [])
+    const candidates = responses
+      .flatMap((r) => r.stopTimes || [])
       .filter((st) => st.place?.departure || st.place?.scheduledDeparture)
       .filter((st) => lines.includes(lineOf(st)))
-      .filter((st) => {
-        const dep = new Date(st.place.departure || st.place.scheduledDeparture).getTime();
-        return dep >= minTime;
-      })
+      .filter((st) => depOf(st) >= minTime)
       .filter((st) => (seen.has(st.tripId) ? false : seen.add(st.tripId)))
-      .sort(
-        (a, b) =>
-          new Date(a.place.departure || a.place.scheduledDeparture) -
-          new Date(b.place.departure || b.place.scheduledDeparture),
-      )
+      .sort((a, b) => depOf(a) - depOf(b))
       .slice(0, MAX_CANDIDATES);
 
-    const result = [];
     // Fahrten derselben Linie und Richtung (routeId + directionId) verhalten sich gleich.
     // Ist eine Gruppe als „falsche Richtung“ erkannt, werden weitere Fahrten nicht abgefragt.
     const groupKey = (st) => `${st.routeId}|${st.directionId}|${st.headsign}`;
-    const irrelevantGroups = new Set();
+    const skipGroups = new Set();
+
+    async function evaluate(st) {
+      let stops;
+      try {
+        stops = await tripStops(st.tripId, signal);
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        // Fahrtverlauf nicht abrufbar: anzeigen, Ankunft unbekannt
+        return { st, stops: [], relevant: true, arrivals: dests.map((d) => ({ station: d })) };
+      }
+      const perDest = dests.map((d) => ({ station: d, ev: evaluateTrip(stops, start, d) }));
+      const relevant = perDest.some((x) => x.ev.relevant);
+      if (!relevant) return { st, stops, relevant };
+      const arrivals = await Promise.all(
+        perDest.map(async ({ station, ev }) => {
+          if (ev.arrival || ev.scheduledArrival) {
+            return { station, planned: ev.scheduledArrival, expected: ev.arrival, cancelled: !!ev.arrivalCancelled };
+          }
+          if (!ev.relevant) return { station };
+          const cont = await findContinuation(stops, lineOf(st), start, station, signal).catch((e) => {
+            if (e.name === 'AbortError') throw e;
+            return null;
+          });
+          if (!cont) return { station };
+          return {
+            station,
+            planned: cont.scheduledArrival,
+            expected: cont.arrival,
+            cancelled: !!cont.arrivalCancelled,
+            via: cont.via,
+            viaDeparture: cont.viaDeparture,
+            viaWaitMin: cont.viaWaitMin,
+          };
+        }),
+      );
+      return { st, stops, relevant, arrivals };
+    }
+
+    const result = [];
     let i = 0;
     while (i < candidates.length && result.length < count) {
       const batch = [];
       while (i < candidates.length && batch.length < BATCH) {
         const st = candidates[i++];
-        if (!irrelevantGroups.has(groupKey(st))) batch.push(st);
+        if (!skipGroups.has(groupKey(st))) batch.push(st);
       }
       if (!batch.length) break;
-      const evaluated = await Promise.all(
-        batch.map(async (st) => {
-          try {
-            const stops = await tripStops(st.tripId, signal);
-            let ev = evaluateTrip(stops, start, dest);
-            if (ev.relevant && !ev.arrival && !ev.scheduledArrival) {
-              const cont = await findContinuation(stops, lineOf(st), start, dest, signal).catch((e) => {
-                if (e.name === 'AbortError') throw e;
-                return null;
-              });
-              if (cont) return { st, stops: cont.stops, ev: cont };
-            }
-            return { st, stops, ev };
-          } catch (e) {
-            if (e.name === 'AbortError') throw e;
-            // Fahrtverlauf nicht abrufbar: anzeigen, Ankunft unbekannt
-            return { st, stops: [], ev: { relevant: true, arrival: null, scheduledArrival: null } };
-          }
-        }),
-      );
-      for (const { st, stops, ev } of evaluated) {
-        if (!ev.relevant) {
-          irrelevantGroups.add(groupKey(st));
+      const evaluated = await Promise.all(batch.map(evaluate));
+
+      for (const { st, stops, relevant, arrivals } of evaluated) {
+        if (!relevant) {
+          skipGroups.add(groupKey(st));
           continue;
         }
         if (result.length >= count) continue;
-        if (onlyReachingDestination && !ev.arrival && !ev.scheduledArrival) {
+        const reachesAny = arrivals.some((a) => a.planned || a.expected);
+        if (onlyReachingDestination && !reachesAny) {
           // Endet die Fahrt nicht an einem unserer Bahnhöfe, ist keine Weiterfahrt möglich:
           // weitere Fahrten dieser Gruppe brauchen nicht abgefragt zu werden.
-          if (!stationOfStop(stops[stops.length - 1]?.stopId)) irrelevantGroups.add(groupKey(st));
+          if (!stationOfStop(stops[stops.length - 1]?.stopId)) skipGroups.add(groupKey(st));
           continue;
         }
         const p = st.place;
@@ -234,17 +261,21 @@ export const transitousProvider = {
           expectedDeparture: p.departure || p.scheduledDeparture || null,
           track: p.track || p.scheduledTrack || null,
           plannedTrack: p.scheduledTrack || null,
-          plannedArrival: ev.scheduledArrival || null,
-          expectedArrival: cancelled || ev.arrivalCancelled ? null : ev.arrival || null,
           cancelled,
           realtime: !!st.realTime,
-          continuesVia: ev.via || null,
-          continuesAt: ev.viaDeparture || null,
-          continuesWaitMin: ev.viaWaitMin ?? null,
+          arrivals: arrivals.map((a) => ({
+            stationKey: a.station.key,
+            stationName: a.station.name,
+            plannedArrival: a.planned || null,
+            expectedArrival: cancelled || a.cancelled ? null : a.expected || a.planned || null,
+            continuesVia: a.via || null,
+            continuesAt: a.viaDeparture || null,
+            continuesWaitMin: a.viaWaitMin ?? null,
+          })),
         });
       }
     }
     result.sort((a, b) => new Date(a.expectedDeparture) - new Date(b.expectedDeparture));
-    return { connections: result, realtimeAvailable: result.some((c) => c.realtime) };
+    return { connections: result };
   },
 };

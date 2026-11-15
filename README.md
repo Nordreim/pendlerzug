@@ -6,6 +6,7 @@ mit geplanter und voraussichtlicher Abfahrt, Gleis, voraussichtlicher Ankunft am
 ## Datenquelle
 
 - MVP: [Transitous](https://transitous.org) (MOTIS-API, Datenquellen siehe <https://transitous.org/sources/>), ohne API-Key.
+- Mehrere Zielbahnhöfe gleichzeitig wählbar; je Ziel wird die Ankunftszeit (oder n.V.) angezeigt.
 - Später: offizielle DB-API (DB API Marketplace „Timetables“). Dafür wird nur `src/providers/dbTimetables.js`
   umgesetzt; die Oberfläche bleibt unverändert (gemeinsames Format siehe `src/providers/index.js`).
 

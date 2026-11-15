@@ -27,17 +27,17 @@
   <main>
     <form id="search" class="card form" novalidate>
       <div class="route">
-        <label class="field">
+        <label class="field from-field">
           <span class="label">Von</span>
           <select id="start" name="start"></select>
         </label>
-        <button type="button" class="swap" id="swap" aria-label="Start und Ziel tauschen">
+        <button type="button" class="swap" id="swap" aria-label="Richtung tauschen">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M7 4v13m0 0-3-3m3 3 3-3M17 20V7m0 0-3 3m3-3 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <label class="field">
-          <span class="label">Nach</span>
-          <select id="dest" name="dest"></select>
-        </label>
+        <fieldset class="field to-field">
+          <legend class="label">Nach <span class="label-hint">(mehrere möglich)</span></legend>
+          <div class="chips dest-chips" id="dests"></div>
+        </fieldset>
       </div>
 
       <div class="field">
@@ -54,7 +54,7 @@
         <div class="chips" id="lines"></div>
       </fieldset>
 
-      <label class="toggle"><input type="checkbox" id="onlyDest" /> Nur Züge, die bis zum Ziel fahren</label>
+      <label class="toggle"><input type="checkbox" id="onlyDest" /> Nur Züge, die mindestens ein Ziel erreichen</label>
 
       <p class="form-error" id="formError" role="alert" hidden></p>
 
