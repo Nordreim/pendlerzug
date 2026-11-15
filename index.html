@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Pendlerzug Stade – Hamburg</title>
+  <meta name="description" content="Nächste Züge zwischen Stade, Neugraben, Hamburg-Harburg und Hamburg Hbf mit voraussichtlichen Zeiten." />
+  <meta name="theme-color" content="#14213d" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Pendlerzug" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="./icon-180.png" />
+  <link rel="preconnect" href="https://api.fontshare.com" />
+  <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>Pendlerzug</span>
+    </div>
+    <span class="clock" id="clock" aria-live="off"></span>
+  </header>
+
+  <main>
+    <form id="search" class="card form" novalidate>
+      <div class="route">
+        <label class="field">
+          <span class="label">Von</span>
+          <select id="start" name="start"></select>
+        </label>
+        <button type="button" class="swap" id="swap" aria-label="Start und Ziel tauschen">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M7 4v13m0 0-3-3m3 3 3-3M17 20V7m0 0-3 3m3-3 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <label class="field">
+          <span class="label">Nach</span>
+          <select id="dest" name="dest"></select>
+        </label>
+      </div>
+
+      <div class="field">
+        <div class="label-row">
+          <label class="label" for="offset">Abfahrt ab (voraussichtlich)</label>
+          <output id="timeOut" for="offset" class="time-out"></output>
+        </div>
+        <input type="range" id="offset" min="0" max="30" step="1" value="0" />
+        <div class="range-scale" aria-hidden="true"><span>jetzt</span><span>+15 min</span><span>+30 min</span></div>
+      </div>
+
+      <fieldset class="field">
+        <legend class="label">Linien</legend>
+        <div class="chips" id="lines"></div>
+      </fieldset>
+
+      <label class="toggle"><input type="checkbox" id="onlyDest" /> Nur Züge, die bis zum Ziel fahren</label>
+
+      <p class="form-error" id="formError" role="alert" hidden></p>
+
+      <button type="submit" class="primary" id="submit">Suchen</button>
+    </form>
+
+    <section id="results" class="results" aria-live="polite"></section>
+  </main>
+
+  <footer class="footer">
+    <p>
+      Daten: <a href="https://transitous.org/sources/" target="_blank" rel="noopener">Transitous und dessen Datenquellen</a>,
+      Kartendaten © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap-Mitwirkende</a>.
+      Angaben ohne Gewähr.
+    </p>
+    <p>
+      Quellcode und Kontakt: <a href="https://github.com/Nordreim/pendlerzug" target="_blank" rel="noopener">github.com/Nordreim/pendlerzug</a>
+    </p>
+  </footer>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
