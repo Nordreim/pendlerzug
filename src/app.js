@@ -14,7 +14,8 @@ const els = {
 };
 
 const fmtTime = new Intl.DateTimeFormat('de-DE', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
-const hourInBerlin = (d) => Number(new Intl.DateTimeFormat('de-DE', { timeZone: TZ, hour: '2-digit', hour12: false }).format(d));
+const hourFmt = new Intl.DateTimeFormat('de-DE', { timeZone: TZ, hour: 'numeric', hourCycle: 'h23' });
+const hourInBerlin = (d) => Number(hourFmt.formatToParts(d).find((p) => p.type === 'hour').value) % 24;
 const t = (iso) => (iso ? fmtTime.format(new Date(iso)) : null);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
@@ -37,9 +38,11 @@ function initForm() {
     (s) => `<label class="chip"><input type="checkbox" name="dests" value="${s.key}" /><span>${esc(s.name)}</span></label>`,
   ).join('');
 
-  const morning = hourInBerlin(new Date()) < 12;
-  els.start.value = morning ? 'stade' : 'hbf';
-  setDests([morning ? 'hbf' : 'stade']);
+  // 22–12 Uhr: Stade → Hamburg Hbf, 12–22 Uhr: Hamburg Hbf → Stade
+  const hour = hourInBerlin(new Date());
+  const toHamburg = hour >= 22 || hour < 12;
+  els.start.value = toHamburg ? 'stade' : 'hbf';
+  setDests([toHamburg ? 'hbf' : 'stade']);
 
   els.lines.innerHTML = LINES.map(
     (l) => `<label class="chip" style="--c:${l.color}">
