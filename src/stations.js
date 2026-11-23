@@ -57,11 +57,5 @@ export function lineHints(startKey, destKey, lines) {
   if (lines.includes('RE5') && involves('neugraben')) {
     hints.push('Der RE5 hält nicht in Neugraben. Für diese Strecke werden keine RE5-Verbindungen angezeigt.');
   }
-  if (lines.includes('RE5') && destKey === 'hbf') {
-    hints.push('Der RE5 fährt in der Regel nur bis Hamburg-Harburg. Die Ankunft am Hbf wird dann als „n.V.“ angezeigt.');
-  }
-  if (lines.includes('RE5') && startKey === 'hbf') {
-    hints.push('Der RE5 fährt in der Regel erst ab Hamburg-Harburg, daher meist keine RE5-Abfahrten ab Hamburg Hbf.');
-  }
   return hints;
 }

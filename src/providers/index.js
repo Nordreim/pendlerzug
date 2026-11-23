@@ -13,6 +13,8 @@
 //   }]
 // }
 // Abfrage: searchConnections({ startKey, destKeys, lines, time, count, signal, onlyReachingDestination })
+// Optional: getLineStatus({ lines, signal }) für das Lagebild je Linie
+// (Fahrten, Ausfälle, Verspätungen, Meldungen).
 // Für die spätere offizielle DB-API wird nur eine weitere Datei
 // (z. B. dbTimetables.js) mit derselben Funktion ergänzt.
 

@@ -9,7 +9,7 @@ const provider = getProvider('transitous');
 const $ = (id) => document.getElementById(id);
 const els = {
   start: $('start'), dests: $('dests'), swap: $('swap'), offset: $('offset'),
-  timeOut: $('timeOut'), lines: $('lines'), form: $('search'), submit: $('submit'),
+  timeOut: $('timeOut'), lageBody: $('lageBody'), lageRefresh: $('lageRefresh'), lines: $('lines'), form: $('search'), submit: $('submit'),
   error: $('formError'), onlyDest: $('onlyDest'), results: $('results'), clock: $('clock'),
 };
 
@@ -231,5 +231,60 @@ function shortName(n) {
   return n.replace('Hamburg-', '').replace('Hamburg ', '');
 }
 
+// Lagebild für alle drei Linien, unabhängig von der Auswahl im Formular
+const STATUS_LINES = ['RE5', 'S5', 'S3'];
+const STATUS_REFRESH_MS = 120000;
+let statusController = null;
+
+function lineState(s) {
+  if (!s.trips) return { cls: 'plan', label: 'keine Fahrten', detail: 'In den nächsten 90 Minuten sind keine Fahrten geplant.' };
+  const parts = [];
+  if (s.cancelled) parts.push(`${s.cancelled} Ausfall${s.cancelled === 1 ? '' : 'e'}`);
+  if (s.delayed) parts.push(`${s.delayed} verspätet, bis +${s.maxDelay} min`);
+  else if (s.maxDelay > 0) parts.push(`bis +${s.maxDelay} min`);
+  const coverage = s.realtime + s.cancelled < s.trips
+    ? `Echtzeit für ${s.realtime} von ${s.trips} Fahrten` : `${s.trips} Fahrt${s.trips === 1 ? '' : 'en'}`;
+  if (s.cancelled || s.maxDelay >= 10) return { cls: 'bad', label: s.cancelled ? 'Ausfälle' : 'Große Verspätungen', detail: [...parts, coverage].join(' · ') };
+  if (!s.realtime) return { cls: 'plan', label: 'keine Echtzeitdaten', detail: `${s.trips} Fahrt${s.trips === 1 ? '' : 'en'} laut Plan` };
+  if (s.realtime * 2 < s.trips - s.cancelled) {
+    return { cls: s.delayed ? 'late' : 'plan', label: s.delayed ? 'Verspätungen' : 'kaum Echtzeitdaten',
+      detail: [...parts, `${coverage}${s.delayed ? '' : ', diese pünktlich'}`].join(' · ') };
+  }
+  if (s.delayed) return { cls: 'late', label: 'Verspätungen', detail: [...parts, coverage].join(' · ') };
+  return { cls: 'ok', label: 'weitgehend pünktlich', detail: [...parts, coverage].join(' · ') };
+}
+
+async function loadStatus() {
+  if (!provider.getLineStatus) return;
+  statusController?.abort();
+  statusController = new AbortController();
+  els.lageRefresh.disabled = true;
+  try {
+    const res = await provider.getLineStatus({ lines: STATUS_LINES, signal: statusController.signal });
+    const rows = res.lines.map((s) => {
+      const line = LINES.find((l) => l.key === s.line);
+      const st = lineState(s);
+      const alerts = s.alerts.map((a) => `<p class="alert">${a.header ? `<strong>${esc(a.header)}</strong> ` : ''}${esc(a.text)}</p>`).join('');
+      return `<div class="lage-row" style="--c:${line?.color || '#14213d'}">
+        <span class="badge">${esc(s.line)}</span>
+        <div class="lage-text"><span class="lage-label ${st.cls}">${esc(st.label)}</span>
+          <span class="lage-detail">${esc(st.detail)}</span>${alerts}</div>
+        <span class="dot ${st.cls}" aria-hidden="true"></span>
+      </div>`;
+    }).join('');
+    els.lageBody.innerHTML = rows + `<p class="note lage-meta">Nächste ${res.windowMin} min ab ${esc(res.station)}, verspätet ab +${res.threshold} min. Stand ${fmtTime.format(new Date())} Uhr.</p>`;
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    console.error(e);
+    els.lageBody.innerHTML = '<p class="note">Die Lage konnte gerade nicht geladen werden.</p>';
+  } finally {
+    els.lageRefresh.disabled = false;
+  }
+}
+
 initForm();
 validate();
+els.lageRefresh.addEventListener('click', loadStatus);
+loadStatus();
+setInterval(() => { if (!document.hidden) loadStatus(); }, STATUS_REFRESH_MS);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) loadStatus(); });

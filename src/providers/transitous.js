@@ -279,3 +279,75 @@ export const transitousProvider = {
     return { connections: result };
   },
 };
+
+// ---------------------------------------------------------------------------
+// Lagebild: Pünktlichkeit und Ausfälle je Linie in den nächsten Minuten.
+// Gemessen an Hamburg-Harburg, wo RE5, S5 und S3 in beiden Richtungen halten.
+
+const STATUS_STATION = 'harburg';
+const STATUS_WINDOW_MIN = 90;
+const DELAY_THRESHOLD_MIN = 5;
+
+function alertTexts(st) {
+  const list = [...(st.place?.alerts || []), ...(st.alerts || [])];
+  return list
+    .map((a) => ({
+      header: a.headerText || a.header || '',
+      text: a.descriptionText || a.description || '',
+    }))
+    .filter((a) => a.header || a.text);
+}
+
+/**
+ * @param {{lines:string[], signal?:AbortSignal}} q
+ * @returns {Promise<{station:string, windowMin:number, lines:Array<{
+ *   line:string, trips:number, realtime:number, cancelled:number, delayed:number,
+ *   maxDelay:number, alerts:Array<{header:string,text:string}>}>}>}
+ */
+export async function getLineStatus({ lines, signal }) {
+  const station = stationByKey(STATUS_STATION);
+  const now = Date.now();
+  const from = new Date(now - LOOKBACK_MIN * 60000);
+  const until = now + STATUS_WINDOW_MIN * 60000;
+  const stopIds = [...new Set([station.transitous.S, station.transitous.RE])];
+  const responses = await Promise.all(
+    stopIds.map((stopId) => {
+      const params = new URLSearchParams({
+        stopId, time: from.toISOString(), n: '150', radius: '0', exactRadius: 'true', withAlerts: 'true',
+      });
+      return getJson(`${BASE}/stoptimes?${params}`, signal);
+    }),
+  );
+
+  const stats = new Map(lines.map((l) => [l, { line: l, trips: 0, realtime: 0, cancelled: 0, delayed: 0, maxDelay: 0, alerts: [] }]));
+  const seen = new Set();
+  for (const st of responses.flatMap((r) => r.stopTimes || [])) {
+    const s = stats.get(lineOf(st));
+    if (!s || seen.has(st.tripId)) continue;
+    const p = st.place || {};
+    const planned = p.scheduledDeparture || p.scheduledArrival;
+    const expected = p.departure || p.arrival || planned;
+    if (!planned) continue;
+    const exp = new Date(expected).getTime();
+    const plan = new Date(planned).getTime();
+    // Fahrten, die noch bevorstehen und deren Planzeit im Zeitfenster liegt
+    if (exp < now - 60000 || plan > until) continue;
+    seen.add(st.tripId);
+    s.trips++;
+    for (const a of alertTexts(st)) {
+      if (!s.alerts.some((x) => x.header === a.header && x.text === a.text)) s.alerts.push(a);
+    }
+    if (st.cancelled || st.tripCancelled || p.cancelled) {
+      s.cancelled++;
+      continue;
+    }
+    if (!st.realTime) continue;
+    s.realtime++;
+    const delay = Math.max(0, Math.round((exp - plan) / 60000));
+    if (delay >= DELAY_THRESHOLD_MIN) s.delayed++;
+    s.maxDelay = Math.max(s.maxDelay, delay);
+  }
+  return { station: station.name, windowMin: STATUS_WINDOW_MIN, threshold: DELAY_THRESHOLD_MIN, lines: [...stats.values()] };
+}
+
+transitousProvider.getLineStatus = getLineStatus;
