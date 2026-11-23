@@ -1,5 +1,5 @@
-import { STATIONS, LINES, stationByKey, lineHints } from './stations.js';
-import { getProvider } from './providers/index.js';
+import { STATIONS, LINES, stationByKey, lineHints } from './stations.js?v=20261123b';
+import { getProvider } from './providers/index.js?v=20261123b';
 
 const TZ = 'Europe/Berlin';
 const RESULT_COUNT = 4;
@@ -255,12 +255,17 @@ function lineState(s) {
 }
 
 async function loadStatus() {
-  if (!provider.getLineStatus) return;
+  if (!provider.getLineStatus) {
+    els.lageBody.innerHTML = '<p class="note">Die Lage ist gerade nicht verfügbar. Bitte die Seite neu laden.</p>';
+    return;
+  }
   statusController?.abort();
-  statusController = new AbortController();
+  const controller = (statusController = new AbortController());
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 15000);
   els.lageRefresh.disabled = true;
   try {
-    const res = await provider.getLineStatus({ lines: STATUS_LINES, signal: statusController.signal });
+    const res = await provider.getLineStatus({ lines: STATUS_LINES, signal: controller.signal });
     const rows = res.lines.map((s) => {
       const line = LINES.find((l) => l.key === s.line);
       const st = lineState(s);
@@ -274,11 +279,12 @@ async function loadStatus() {
     }).join('');
     els.lageBody.innerHTML = rows + `<p class="note lage-meta">Nächste ${res.windowMin} min ab ${esc(res.station)}, verspätet ab +${res.threshold} min. Stand ${fmtTime.format(new Date())} Uhr.</p>`;
   } catch (e) {
-    if (e.name === 'AbortError') return;
+    if (e.name === 'AbortError' && !timedOut) return;
     console.error(e);
-    els.lageBody.innerHTML = '<p class="note">Die Lage konnte gerade nicht geladen werden.</p>';
+    els.lageBody.innerHTML = `<p class="note">Die Lage konnte gerade nicht geladen werden${timedOut ? ' (keine Antwort vom Datendienst)' : ''}. Zum erneuten Versuch oben rechts tippen.</p>`;
   } finally {
-    els.lageRefresh.disabled = false;
+    clearTimeout(timer);
+    if (statusController === controller) els.lageRefresh.disabled = false;
   }
 }
 
