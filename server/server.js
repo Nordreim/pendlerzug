@@ -139,9 +139,16 @@ function toLineGroups(json) {
   return groups;
 }
 
+const RETRY_MS = 60 * 1000; // nach einem Fehler höchstens einmal pro Minute neu bei Geofox anfragen
+let lastFailAt = 0;
+let lastError = null;
+
 async function getData() {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.data;
   if (inflight) return inflight;
+  if (Date.now() - lastFailAt < RETRY_MS) {
+    return cache ? { ...cache.data, stale: true } : { ok: false, error: lastError };
+  }
   inflight = (async () => {
     try {
       const json = await fetchAnnouncements();
@@ -150,9 +157,11 @@ async function getData() {
       return data;
     } catch (e) {
       console.error(new Date().toISOString(), e.message);
+      lastFailAt = Date.now();
+      lastError = 'Meldungen beim HVV gerade nicht abrufbar';
       // Bei Fehlern die letzten bekannten Meldungen weitergeben, falls vorhanden
       if (cache) return { ...cache.data, stale: true };
-      return { ok: false, error: e.message };
+      return { ok: false, error: lastError };
     } finally {
       inflight = null;
     }
@@ -160,10 +169,19 @@ async function getData() {
   return inflight;
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => {
+  handle(req, res).catch((e) => {
+    console.error(new Date().toISOString(), 'Handler-Fehler', e?.message);
+    if (!res.headersSent) res.writeHead(500, { 'Access-Control-Allow-Origin': '*' });
+    res.end('error');
+  });
+});
+
+async function handle(req, res) {
   const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS' };
   if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
-  const url = new URL(req.url, 'http://x');
+  let url;
+  try { url = new URL(req.url, 'http://x'); } catch { res.writeHead(400, cors); return res.end('bad request'); }
   if (req.method === 'GET' && url.pathname.endsWith('/api/meldungen')) {
     const data = await getData();
     res.writeHead(data.ok ? 200 : 502, { ...cors, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -175,6 +193,6 @@ const server = http.createServer(async (req, res) => {
   }
   res.writeHead(404, cors);
   res.end('not found');
-});
+}
 
 server.listen(PORT, () => console.log(`Meldungs-Server läuft auf Port ${PORT}`));
