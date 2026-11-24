@@ -22,3 +22,10 @@ Lokal starten: `python3 -m http.server` im Projektordner, dann <http://localhost
 ## Lizenz
 
 MIT
+
+## HVV-Störungsmeldungen (Server)
+
+`server/server.js` (Node 20, ohne Abhängigkeiten) ruft die offiziellen Meldungen über die Geofox-GTI-Schnittstelle (`getAnnouncements`) ab, filtert sie auf RE5, S5 und S3 und stellt sie unter `/api/meldungen` bereit (3 Minuten Cache).
+Die Anfrage ist fest, daher ist auch die HMAC-Signatur fest. Sie liegt nicht im Repository, sondern wird als Header `geofox-auth-signature` ergänzt – lokal über die Umgebungsvariable `GTI_SIGNATURE`.
+
+Start: `GTI_USER=<Benutzer> GTI_SIGNATURE=<Signatur> node server/server.js` (Port 5000).

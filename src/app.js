@@ -1,5 +1,5 @@
-import { STATIONS, LINES, stationByKey, lineHints } from './stations.js?v=20261123b';
-import { getProvider } from './providers/index.js?v=20261123b';
+import { STATIONS, LINES, stationByKey, lineHints } from './stations.js?v=20261124c';
+import { getProvider } from './providers/index.js?v=20261124c';
 
 const TZ = 'Europe/Berlin';
 const RESULT_COUNT = 4;
@@ -9,7 +9,7 @@ const provider = getProvider('transitous');
 const $ = (id) => document.getElementById(id);
 const els = {
   start: $('start'), dests: $('dests'), swap: $('swap'), offset: $('offset'),
-  timeOut: $('timeOut'), lageBody: $('lageBody'), lageRefresh: $('lageRefresh'), lines: $('lines'), form: $('search'), submit: $('submit'),
+  timeOut: $('timeOut'), lageBody: $('lageBody'), lageRefresh: $('lageRefresh'), lageMini: $('lageMini'), lageMeta: $('lageMeta'), lines: $('lines'), form: $('search'), submit: $('submit'),
   error: $('formError'), onlyDest: $('onlyDest'), results: $('results'), clock: $('clock'),
 };
 
@@ -231,12 +231,28 @@ function shortName(n) {
   return n.replace('Hamburg-', '').replace('Hamburg ', '');
 }
 
-// Lagebild für alle drei Linien, unabhängig von der Auswahl im Formular
+// Lagebild für alle drei Linien, unabhängig von der Auswahl im Formular:
+// Pünktlichkeit aus den Fahrplandaten (Transitous) und HVV-Meldungen (Geofox, über eigenen Server)
 const STATUS_LINES = ['RE5', 'S5', 'S3'];
 const STATUS_REFRESH_MS = 120000;
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+const rawApi = window.__API_BASE__ || '__PORT_5000__';
+const API_BASE = rawApi.startsWith('__PORT_') ? (LOCAL_HOSTS.has(location.hostname) ? 'http://localhost:5000' : null) : rawApi;
+
+const REASONS = {
+  ROADWORKS: 'Bauarbeiten', SERVICE_FAILURE: 'Betriebsstörung', ACCIDENT: 'Unfall', POLICE_REQUEST: 'Polizeieinsatz',
+  FIRE_BRIGADE_SAFETY_CHECKS: 'Feuerwehreinsatz', VEHICLE_ON_THE_LINE: 'Fahrzeug im Gleis', ROUTE_BLOCKAGE: 'Streckensperrung',
+  STAFF_ABSENCE: 'Personalausfall', SPECIAL_EVENT: 'Veranstaltung', DEMONSTRATION: 'Demonstration', BOMB_ALERT: 'Bombenentschärfung',
+  CONGESTION: 'Stau', SLIPPERINESS: 'Glätte', ROAD_CLOSED: 'Straßensperrung', STATION_OVERRUN: 'Überfüllung',
+};
+const fmtDateTime = new Intl.DateTimeFormat('de-DE', { timeZone: TZ, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+const openLines = new Set();
 let statusController = null;
+let lastPunct = null;
+let lastHvv = null;
 
 function lineState(s) {
+  if (!s) return { cls: 'plan', label: 'Fahrplandaten nicht verfügbar', detail: '' };
   if (!s.trips) return { cls: 'plan', label: 'keine Fahrten', detail: 'In den nächsten 90 Minuten sind keine Fahrten geplant.' };
   const parts = [];
   if (s.cancelled) parts.push(`${s.cancelled} Ausfall${s.cancelled === 1 ? '' : 'e'}`);
@@ -254,38 +270,127 @@ function lineState(s) {
   return { cls: 'ok', label: 'weitgehend pünktlich', detail: [...parts, coverage].join(' · ') };
 }
 
+function rangeText(v) {
+  const b = v.begin ? fmtDateTime.format(new Date(v.begin)) : null;
+  const e = v.end ? fmtDateTime.format(new Date(v.end)) : null;
+  if (b && e) return `${b} – ${e} Uhr`;
+  if (b) return `ab ${b} Uhr`;
+  if (e) return `bis ${e} Uhr`;
+  return '';
+}
+
+function sectionText(sec) {
+  const part = sec.from && sec.to && sec.from !== sec.to ? `${sec.from} – ${sec.to}` : sec.from || sec.to || 'gesamte Linie';
+  const dir = sec.bothDirections ? 'beide Richtungen' : sec.direction ? `Richtung ${sec.direction}` : '';
+  return dir ? `${part} (${dir})` : part;
+}
+
+const KIND_TAG = {
+  stoerung: '<span class="tag bad">Störung</span>',
+  aktuell: '<span class="tag late">Jetzt gültig</span>',
+  angekuendigt: '<span class="tag plan">Angekündigt</span>',
+  barrierefrei: '<span class="tag soft">Barrierefreiheit</span>',
+};
+
+function messageHtml(m) {
+  const kind = KIND_TAG[m.kind] || KIND_TAG.angekuendigt;
+  const reason = m.kind !== 'barrierefrei' && m.reason && REASONS[m.reason] ? `<span class="tag soft">${esc(REASONS[m.reason])}</span>` : '';
+  const allSections = [...new Set(m.sections.map(sectionText))];
+  const sections = allSections.slice(0, 4);
+  const times = m.validities.map(rangeText).filter(Boolean);
+  const links = m.links.map((l) => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`).join(' · ');
+  return `<article class="msg ${esc(m.kind)}">
+    <div class="msg-tags">${kind}${reason}</div>
+    ${m.summary ? `<p class="msg-title">${esc(m.summary)}</p>` : ''}
+    ${sections.length ? `<p class="msg-meta"><span>Abschnitt:</span> ${esc(sections.join('; '))}${allSections.length > 4 ? ' …' : ''}</p>` : ''}
+    ${times.length ? `<p class="msg-meta"><span>Zeitraum:</span> ${esc(times.join('; '))}${m.moreValidities ? ` und ${m.moreValidities} weitere` : ''}</p>` : ''}
+    ${m.description ? `<p class="msg-text">${esc(m.description)}</p>` : ''}
+    ${links ? `<p class="msg-links">${links}</p>` : ''}
+  </article>`;
+}
+
+function hvvSummary(route) {
+  if (!route.length) return 'Keine HVV-Meldungen zur Strecke Stade – Hamburg';
+  const n = (k) => route.filter((m) => m.kind === k).length;
+  const parts = [];
+  if (n('stoerung')) parts.push(`${n('stoerung')} Störung${n('stoerung') === 1 ? '' : 'en'}`);
+  if (n('aktuell')) parts.push(`${n('aktuell')} jetzt gültig`);
+  if (n('angekuendigt')) parts.push(`${n('angekuendigt')} angekündigt`);
+  if (n('barrierefrei')) parts.push(`${n('barrierefrei')} Barrierefreiheit`);
+  return `${route.length} HVV-Meldung${route.length === 1 ? '' : 'en'}: ${parts.join(', ')}`;
+}
+
+function renderStatus() {
+  const punct = lastPunct?.lines ? Object.fromEntries(lastPunct.lines.map((s) => [s.line, s])) : {};
+  const hvvOk = lastHvv && lastHvv.ok;
+  const mini = [];
+  const rows = STATUS_LINES.map((key) => {
+    const line = LINES.find((l) => l.key === key);
+    const st = lineState(punct[key]);
+    const msgs = hvvOk ? lastHvv.lines[key] || [] : [];
+    const route = msgs.filter((m) => m.onRoute);
+    const other = msgs.filter((m) => !m.onRoute);
+    const unplanned = route.filter((m) => m.kind === 'stoerung').length;
+    const dotCls = unplanned ? 'bad' : st.cls;
+    mini.push(`<span class="mini" style="--c:${line?.color}"><span class="badge">${esc(key)}</span><span class="dot ${dotCls}"></span></span>`);
+    const hvvLine = !lastHvv ? 'HVV-Meldungen werden geladen …'
+      : !hvvOk ? 'HVV-Meldungen gerade nicht verfügbar'
+      : hvvSummary(route);
+    const otherHtml = other.length
+      ? `<details class="others"><summary>Weitere Meldungen auf anderen Abschnitten (${other.length})</summary>${other.map(messageHtml).join('')}</details>` : '';
+    const list = hvvOk
+      ? (route.length ? route.map(messageHtml).join('') : '<p class="note">Zurzeit liegen beim HVV keine Meldungen zur Strecke Stade – Hamburg für diese Linie vor.</p>') + otherHtml
+      : '<p class="note">Die HVV-Meldungen konnten gerade nicht geladen werden. Über den Link unten sind sie direkt beim HVV einsehbar.</p>';
+    const count = hvvOk && route.length ? `<span class="count${unplanned ? ' bad' : ''}" title="HVV-Meldungen zur Strecke">${route.length}</span>` : '';
+    return `<details class="lage-line" data-line="${key}" style="--c:${line?.color || '#14213d'}"${openLines.has(key) ? ' open' : ''}>
+      <summary class="lage-row">
+        <span class="badge">${esc(key)}</span>
+        <span class="lage-text"><span class="lage-label ${st.cls}">${esc(st.label)}</span>
+          ${st.detail ? `<span class="lage-detail">${esc(st.detail)}</span>` : ''}
+          <span class="lage-detail hvv${unplanned ? ' bad' : ''}">${esc(hvvLine)}</span></span>
+        <span class="lage-end">${count}<span class="dot ${dotCls}" aria-hidden="true"></span></span>
+      </summary>
+      <div class="msgs">${list}</div>
+    </details>`;
+  }).join('');
+  els.lageBody.innerHTML = rows;
+  els.lageMini.innerHTML = mini.join('');
+  els.lageBody.querySelectorAll('details.lage-line').forEach((d) => d.addEventListener('toggle', () => {
+    if (d.open) openLines.add(d.dataset.line); else openLines.delete(d.dataset.line);
+  }));
+  const parts = [`Pünktlichkeit: nächste 90 min ab Hamburg-Harburg, verspätet ab +5 min`];
+  if (hvvOk) parts.push(`Meldungen: HVV (Geofox)${lastHvv.stale ? ', zuletzt bekannter Stand' : ''}`);
+  els.lageMeta.textContent = `${parts.join('. ')}. Stand ${fmtTime.format(new Date())} Uhr.`;
+}
+
+async function loadHvv(signal) {
+  if (!API_BASE) throw new Error('Kein Server konfiguriert');
+  const res = await fetch(`${API_BASE}/api/meldungen`, { signal, credentials: 'same-origin' });
+  const data = await res.json().catch(() => ({ ok: false }));
+  if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
 async function loadStatus() {
-  if (!provider.getLineStatus) {
-    els.lageBody.innerHTML = '<p class="note">Die Lage ist gerade nicht verfügbar. Bitte die Seite neu laden.</p>';
-    return;
-  }
   statusController?.abort();
   const controller = (statusController = new AbortController());
   let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 15000);
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 20000);
   els.lageRefresh.disabled = true;
-  try {
-    const res = await provider.getLineStatus({ lines: STATUS_LINES, signal: controller.signal });
-    const rows = res.lines.map((s) => {
-      const line = LINES.find((l) => l.key === s.line);
-      const st = lineState(s);
-      const alerts = s.alerts.map((a) => `<p class="alert">${a.header ? `<strong>${esc(a.header)}</strong> ` : ''}${esc(a.text)}</p>`).join('');
-      return `<div class="lage-row" style="--c:${line?.color || '#14213d'}">
-        <span class="badge">${esc(s.line)}</span>
-        <div class="lage-text"><span class="lage-label ${st.cls}">${esc(st.label)}</span>
-          <span class="lage-detail">${esc(st.detail)}</span>${alerts}</div>
-        <span class="dot ${st.cls}" aria-hidden="true"></span>
-      </div>`;
-    }).join('');
-    els.lageBody.innerHTML = rows + `<p class="note lage-meta">Nächste ${res.windowMin} min ab ${esc(res.station)}, verspätet ab +${res.threshold} min. Stand ${fmtTime.format(new Date())} Uhr.</p>`;
-  } catch (e) {
-    if (e.name === 'AbortError' && !timedOut) return;
-    console.error(e);
-    els.lageBody.innerHTML = `<p class="note">Die Lage konnte gerade nicht geladen werden${timedOut ? ' (keine Antwort vom Datendienst)' : ''}. Zum erneuten Versuch oben rechts tippen.</p>`;
-  } finally {
-    clearTimeout(timer);
-    if (statusController === controller) els.lageRefresh.disabled = false;
-  }
+  const punctP = provider.getLineStatus
+    ? provider.getLineStatus({ lines: STATUS_LINES, signal: controller.signal })
+    : Promise.reject(new Error('nicht verfügbar'));
+  const hvvP = loadHvv(controller.signal);
+  const [punct, hvv] = await Promise.allSettled([punctP, hvvP]);
+  clearTimeout(timer);
+  if (statusController !== controller) return; // neuere Abfrage läuft
+  if (controller.signal.aborted && !timedOut) return;
+  if (punct.status === 'fulfilled') lastPunct = punct.value;
+  else { console.error(punct.reason); lastPunct = lastPunct || { lines: null }; }
+  if (hvv.status === 'fulfilled') lastHvv = hvv.value;
+  else { console.warn('HVV-Meldungen:', hvv.reason?.message); if (!lastHvv?.ok) lastHvv = { ok: false }; }
+  renderStatus();
+  els.lageRefresh.disabled = false;
 }
 
 initForm();

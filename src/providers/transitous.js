@@ -1,7 +1,7 @@
 // Datenquelle: Transitous (MOTIS-API, https://transitous.org)
 // Liefert Verbindungen im einheitlichen Format (siehe providers/index.js).
 
-import { STATIONS, stationByKey } from '../stations.js?v=20261123b';
+import { STATIONS, stationByKey } from '../stations.js?v=20261124c';
 
 const BASE = 'https://api.transitous.org/api/v1';
 const LOOKBACK_MIN = 40; // verspätete Züge mit früherer Planzeit mit erfassen
