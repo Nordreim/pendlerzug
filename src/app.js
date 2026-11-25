@@ -1,5 +1,5 @@
-import { STATIONS, LINES, stationByKey, lineHints } from './stations.js?v=20261124c';
-import { getProvider } from './providers/index.js?v=20261124c';
+import { STATIONS, LINES, stationByKey, lineHints } from './stations.js?v=20261125a';
+import { getProvider } from './providers/index.js?v=20261125a';
 
 const TZ = 'Europe/Berlin';
 const RESULT_COUNT = 4;
@@ -217,6 +217,8 @@ function connectionHtml(c) {
     body = `<div class="grid three">${depCells}</div><div class="arrivals">${rows}</div>`;
   }
 
+  if (c.kind === 'transfer') return transferHtml(c, line, status, body);
+
   return `<article class="card conn${c.cancelled ? ' cancelled' : ''}" style="--c:${line?.color || '#14213d'}">
     <div class="conn-top">
       <span class="badge">${esc(c.line)}</span>
@@ -224,6 +226,31 @@ function connectionHtml(c) {
       ${status}
     </div>
     ${body}
+  </article>`;
+}
+
+function transferHtml(c, line1, status, body) {
+  const tr = c.transfer;
+  const line2 = LINES.find((l) => l.key === c.second.line);
+  const labels = { ok: 'Anschluss wird erreicht', tight: 'Anschluss wird knapp', lost: 'Anschluss entfällt durch Verspätung' };
+  const mins = tr.level === 'lost' ? 'unter 1 min' : `${tr.minutes} min`;
+  const platform = tr.arrivalTrack && tr.departureTrack && tr.arrivalTrack !== tr.departureTrack
+    ? ` · Gleis ${esc(tr.arrivalTrack)} → ${esc(tr.departureTrack)}` : '';
+  const hub = esc(shortName(tr.stationName || 'Hamburg-Harburg')).replace('Harburg', 'HH-Harburg');
+  const box = `<div class="umst ${tr.level}">
+      <strong>Umsteigezeit in ${hub} ${mins}</strong>
+      <span class="umst-sub">${labels[tr.level]}${platform}</span>
+      <span class="umst-times tnum">${esc(c.line)} an ${t(tr.hubArrivalExpected || tr.hubArrivalPlanned) ?? '–'} · ${esc(c.second.line)} ab ${t(tr.hubDepartureExpected || tr.hubDeparturePlanned) ?? '–'}</span>
+    </div>`;
+  return `<article class="card conn transfer${tr.level === 'lost' ? ' lostconn' : ''}" style="--c:${line1?.color || '#14213d'}">
+    <div class="conn-top">
+      <span class="badge">${esc(c.line)}</span><span class="arrow" aria-hidden="true">→</span>
+      <span class="badge" style="background:${line2?.color || '#14213d'}">${esc(c.second.line)}</span>
+      <span class="direction">via ${hub.replace("HH-","")}</span>
+      ${status}
+    </div>
+    ${body}
+    ${box}
   </article>`;
 }
 

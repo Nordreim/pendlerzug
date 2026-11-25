@@ -268,3 +268,13 @@ details[open] > .lage-summary .lage-mini { visibility: hidden; }
 .others > summary { cursor: pointer; font-size: 0.85rem; color: var(--ink-2); padding: 8px 0; font-weight: 600; }
 .lage-end { display: inline-flex; align-items: center; gap: 6px; margin-top: 2px; }
 .lage-end .dot { margin-top: 0; }
+
+/* Umsteigeverbindungen */
+.conn-top .arrow { color: var(--ink-3); font-weight: 700; margin: 0 -4px; }
+.umst { display: grid; gap: 2px; padding: 9px 11px; border-radius: 8px; border: 1px solid; font-size: 0.92rem; }
+.umst .umst-sub { font-size: 0.82rem; font-weight: 600; }
+.umst .umst-times { font-size: 0.8rem; opacity: 0.85; }
+.umst.ok { background: #e6f4ec; border-color: #9fd2b3; color: #14582f; }
+.umst.tight { background: #fff3c4; border-color: #ecc94b; color: #7a5200; }
+.umst.lost { background: var(--bad-bg); border-color: #f3b4bb; color: var(--bad); }
+.conn.lostconn .arrivals .v, .conn.lostconn .grid .cell:last-child .v { color: var(--bad); }

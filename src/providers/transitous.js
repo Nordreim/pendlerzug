@@ -1,7 +1,7 @@
 // Datenquelle: Transitous (MOTIS-API, https://transitous.org)
 // Liefert Verbindungen im einheitlichen Format (siehe providers/index.js).
 
-import { STATIONS, stationByKey } from '../stations.js?v=20261124c';
+import { STATIONS, stationByKey } from '../stations.js?v=20261125a';
 
 const BASE = 'https://api.transitous.org/api/v1';
 const LOOKBACK_MIN = 40; // verspätete Züge mit früherer Planzeit mit erfassen
@@ -74,6 +74,7 @@ function evaluateTrip(stops, start, dest) {
         arrival: stops[i].arrival || null,
         scheduledArrival: stops[i].scheduledArrival || null,
         arrivalCancelled: !!stops[i].cancelled,
+        track: stops[i].track || stops[i].scheduledTrack || null,
       };
     }
     // Erster Korridor-Bahnhof nach dem Start entscheidet über die Richtung
@@ -140,6 +141,176 @@ async function findContinuation(stops, line, start, dest, signal) {
     viaWaitMin: Math.round((new Date(next.place.departure || next.place.scheduledDeparture) - arr) / 60000),
     stops: nextStops,
   };
+}
+
+
+// ---------------------------------------------------------------------------
+// Umsteigeverbindungen über Hamburg-Harburg (Stade <-> Hamburg Hbf).
+// Zubringer und Anschluss kommen immer aus allen Linien, unabhängig von der Auswahl.
+
+const TRANSFER_STATION = 'harburg';
+const TRANSFER_OK_MIN = 3; // ab hier grün
+const TRANSFER_MIN = 1; // darunter ist der Anschluss weg
+const TRANSFER_MAX_WAIT_MIN = 45;
+const FEEDER_WINDOW_MIN = 120;
+const MAX_FEEDERS = 10;
+const TRANSFER_ROUTES = {
+  'hbf>stade': { feederLines: ['S3', 'S5'], connLines: ['RE5'], feederType: 'S', connType: 'RE' },
+  'stade>hbf': { feederLines: ['RE5'], connLines: ['S3', 'S5'], feederType: 'RE', connType: 'S' },
+};
+
+const ms = (iso) => (iso ? new Date(iso).getTime() : NaN);
+const isCancelled = (st) => !!(st.cancelled || st.tripCancelled || st.place?.cancelled);
+const depMs = (st) => ms(st.place?.departure || st.place?.scheduledDeparture);
+const depPlanMs = (st) => ms(st.place?.scheduledDeparture || st.place?.departure);
+
+function transferLevel(minutes) {
+  if (minutes >= TRANSFER_OK_MIN) return 'ok';
+  if (minutes >= TRANSFER_MIN) return 'tight';
+  return 'lost';
+}
+
+async function searchTransfers({ start, dest, time, signal }) {
+  const route = TRANSFER_ROUTES[`${start.key}>${dest.key}`];
+  if (!route) return [];
+  const hub = stationByKey(TRANSFER_STATION);
+  const minTime = Math.floor(time.getTime() / 60000) * 60000;
+  const until = minTime + FEEDER_WINDOW_MIN * 60000;
+  const stopTimes = (stopId, from) => getJson(`${BASE}/stoptimes?${new URLSearchParams({
+    stopId, time: from.toISOString(), n: '100', radius: '0', exactRadius: 'true',
+  })}`, signal).then((r) => r.stopTimes || []);
+
+  const [fAll, cAll] = await Promise.all([
+    stopTimes(start.transitous[route.feederType], new Date(time.getTime() - LOOKBACK_MIN * 60000)),
+    stopTimes(hub.transitous[route.connType], new Date(time.getTime() - LOOKBACK_MIN * 60000)),
+  ]);
+  const uniq = (list) => { const seen = new Set(); return list.filter((st) => !seen.has(st.tripId) && seen.add(st.tripId)); };
+  const hasDep = (st) => st.place?.departure || st.place?.scheduledDeparture;
+  const feeders = uniq(fAll.filter(hasDep).filter((st) => route.feederLines.includes(lineOf(st)) && !isCancelled(st)
+    && depMs(st) >= minTime && depMs(st) <= until)).sort((a, b) => depMs(a) - depMs(b)).slice(0, 30);
+  const conns = uniq(cAll.filter(hasDep).filter((st) => route.connLines.includes(lineOf(st)) && !isCancelled(st)
+    && depMs(st) >= minTime && depMs(st) <= until + (TRANSFER_MAX_WAIT_MIN + 60) * 60000)).sort((a, b) => depMs(a) - depMs(b));
+
+  // Anschlusszüge werden erst bei Bedarf geprüft (Richtung, Ankunft am Ziel)
+  const connMemo = new Map();
+  const skipGroups = new Set();
+  const gk = (st) => `${st.routeId}|${st.directionId}|${st.headsign}`;
+  const evalConn = (st) => {
+    if (!connMemo.has(st.tripId)) {
+      connMemo.set(st.tripId, (async () => {
+        try {
+          const stops = await tripStops(st.tripId, signal);
+          const ev = evaluateTrip(stops, hub, dest);
+          if (!ev.relevant) { skipGroups.add(gk(st)); return null; }
+          if (!(ev.arrival || ev.scheduledArrival) || ev.arrivalCancelled) return null;
+          return { st, ev, stops };
+        } catch (e) {
+          if (e.name === 'AbortError') throw e;
+          return null;
+        }
+      })());
+    }
+    return connMemo.get(st.tripId);
+  };
+
+  async function pairFeeder(fst) {
+    let fstops;
+    try { fstops = await tripStops(fst.tripId, signal); } catch (e) { if (e.name === 'AbortError') throw e; return null; }
+    const fev = evaluateTrip(fstops, start, hub);
+    if (!fev.relevant) return 'wrong';
+    if (fev.arrivalCancelled || !(fev.arrival || fev.scheduledArrival)) return null;
+    const arrE = ms(fev.arrival || fev.scheduledArrival);
+    const arrP = ms(fev.scheduledArrival || fev.arrival);
+    let intended = null;
+    let valid = null;
+    for (const cst of conns) {
+      const dE = depMs(cst);
+      const dP = depPlanMs(cst);
+      if (dE > arrE + TRANSFER_MAX_WAIT_MIN * 60000 && dP > arrP + TRANSFER_MAX_WAIT_MIN * 60000) break;
+      const okE = dE - arrE >= TRANSFER_MIN * 60000 && dE - arrE <= TRANSFER_MAX_WAIT_MIN * 60000;
+      const okP = dP - arrP >= TRANSFER_MIN * 60000;
+      if (!okE && !(okP && !intended)) continue;
+      if (skipGroups.has(gk(cst))) continue;
+      const c = await evalConn(cst);
+      if (!c) continue;
+      if (okP && !intended) intended = c;
+      if (okE) { valid = c; break; }
+    }
+    const c = valid || intended;
+    if (!c) return null;
+    const dE = depMs(c.st);
+    const minutes = Math.round((dE - arrE) / 60000);
+    const lost = !valid;
+    const planned = Math.round((depPlanMs(c.st) - arrP) / 60000);
+    const lastF = fstops[fstops.length - 1];
+    const lastC = c.stops[c.stops.length - 1];
+    const fp = fst.place;
+    const cp = c.st.place;
+    return {
+      id: `${fst.tripId}>${c.st.tripId}`,
+      kind: 'transfer',
+      line: lineOf(fst),
+      direction: lastF?.name || fst.headsign || '',
+      plannedDeparture: fp.scheduledDeparture || null,
+      expectedDeparture: fp.departure || fp.scheduledDeparture || null,
+      track: fp.track || fp.scheduledTrack || null,
+      plannedTrack: fp.scheduledTrack || null,
+      cancelled: false,
+      realtime: !!fst.realTime,
+      transfer: {
+        stationName: hub.name,
+        minutes: lost ? Math.min(minutes, 0) : minutes,
+        plannedMinutes: planned,
+        level: lost ? 'lost' : transferLevel(minutes),
+        arrivalTrack: fev.track || null,
+        departureTrack: cp.track || cp.scheduledTrack || null,
+        hubArrivalPlanned: fev.scheduledArrival || null,
+        hubArrivalExpected: fev.arrival || fev.scheduledArrival || null,
+        hubDeparturePlanned: cp.scheduledDeparture || null,
+        hubDepartureExpected: cp.departure || cp.scheduledDeparture || null,
+      },
+      second: {
+        line: lineOf(c.st),
+        direction: lastC?.name || c.st.headsign || '',
+        realtime: !!c.st.realTime,
+      },
+      dest: {
+        stationKey: dest.key,
+        stationName: dest.name,
+        plannedArrival: c.ev.scheduledArrival || null,
+        expectedArrival: lost ? null : c.ev.arrival || c.ev.scheduledArrival || null,
+      },
+      connTripId: c.st.tripId,
+    };
+  }
+
+  // Fahrten mit Zubringern auswerten, bis genug relevante gefunden sind
+  const items = [];
+  const feederGroupsSkipped = new Set();
+  let i = 0;
+  while (i < feeders.length && items.length < MAX_FEEDERS) {
+    const batch = [];
+    while (i < feeders.length && batch.length < BATCH) {
+      const st = feeders[i++];
+      if (!feederGroupsSkipped.has(gk(st))) batch.push(st);
+    }
+    if (!batch.length) break;
+    const out = await Promise.all(batch.map(async (st) => ({ st, item: await pairFeeder(st) })));
+    for (const { st, item } of out) {
+      if (item === 'wrong') feederGroupsSkipped.add(gk(st));
+      else if (item) items.push(item);
+    }
+  }
+
+  // Je Anschlusszug nur der späteste Zubringer (gültige Anschlüsse)
+  const byConn = new Map();
+  const lostItems = [];
+  for (const it of items) {
+    if (it.transfer.level === 'lost') { lostItems.push(it); continue; }
+    const cur = byConn.get(it.connTripId);
+    if (!cur || ms(it.expectedDeparture) > ms(cur.expectedDeparture)) byConn.set(it.connTripId, it);
+  }
+  return [...byConn.values(), ...lostItems];
 }
 
 export const transitousProvider = {
@@ -275,8 +446,49 @@ export const transitousProvider = {
         });
       }
     }
+    // Umsteigeverbindungen über Hamburg-Harburg ergänzen (Stade <-> Hamburg Hbf)
+    let transfers = [];
+    const transferDest = dests.find((d) => TRANSFER_ROUTES[`${start.key}>${d.key}`]);
+    if (transferDest) {
+      try {
+        transfers = await searchTransfers({ start, dest: transferDest, time, signal });
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        console.warn('Umsteigeverbindungen nicht verfügbar:', e);
+      }
+    }
+    if (transfers.length) {
+      const arrMs = (c) => {
+        const a = c.arrivals.find((x) => x.stationKey === transferDest.key);
+        return !c.cancelled && a ? ms(a.expectedArrival) : NaN;
+      };
+      const rivals = result.map((c) => ({ id: c.id, dep: ms(c.expectedDeparture), arr: arrMs(c) })).filter((r) => Number.isFinite(r.arr));
+      const ownArr = (t) => ms(t.dest.expectedArrival);
+      const live = transfers.filter((t) => t.transfer.level !== 'lost' && Number.isFinite(ownArr(t)));
+      for (const t of live) rivals.push({ id: t.id, dep: ms(t.expectedDeparture), arr: ownArr(t), transfer: true });
+      const kept = transfers.filter((t) => {
+        if (t.transfer.level === 'lost') return true;
+        const dep = ms(t.expectedDeparture);
+        const arr = ownArr(t);
+        // Ein Umstieg lohnt nur, wenn er mindestens 3 min früher ankommt als jede
+        // gleich spät oder später abfahrende Alternative
+        return !rivals.some((r) => r.id !== t.id && r.dep >= dep && r.arr <= arr + (r.transfer ? 0 : 3 * 60000)
+          && (!r.transfer || r.dep > dep || r.arr < arr || r.id < t.id));
+      });
+      for (const t of kept) {
+        const hubArr = { plannedArrival: t.transfer.hubArrivalPlanned, expectedArrival: t.transfer.hubArrivalExpected };
+        result.push({
+          ...t,
+          arrivals: dests.map((d) => {
+            if (d.key === t.dest.stationKey) return { stationKey: d.key, stationName: d.name, plannedArrival: t.dest.plannedArrival, expectedArrival: t.dest.expectedArrival };
+            if (d.key === TRANSFER_STATION) return { stationKey: d.key, stationName: d.name, ...hubArr };
+            return { stationKey: d.key, stationName: d.name, plannedArrival: null, expectedArrival: null };
+          }),
+        });
+      }
+    }
     result.sort((a, b) => new Date(a.expectedDeparture) - new Date(b.expectedDeparture));
-    return { connections: result };
+    return { connections: result.slice(0, count) };
   },
 };
 
