@@ -18,8 +18,8 @@
 // Für die spätere offizielle DB-API wird nur eine weitere Datei
 // (z. B. dbTimetables.js) mit derselben Funktion ergänzt.
 
-import { transitousProvider } from './transitous.js?v=20261125a';
-import { dbTimetablesProvider } from './dbTimetables.js?v=20261125a';
+import { transitousProvider } from './transitous.js?v=20261126a';
+import { dbTimetablesProvider } from './dbTimetables.js?v=20261126a';
 
 const PROVIDERS = { transitous: transitousProvider, db: dbTimetablesProvider };
 

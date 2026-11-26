@@ -1,5 +1,5 @@
-import { STATIONS, LINES, stationByKey, lineHints } from './stations.js?v=20261125a';
-import { getProvider } from './providers/index.js?v=20261125a';
+import { STATIONS, LINES, stationByKey, lineHints } from './stations.js?v=20261126a';
+import { getProvider } from './providers/index.js?v=20261126a';
 
 const TZ = 'Europe/Berlin';
 const RESULT_COUNT = 4;
